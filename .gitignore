@@ -1,0 +1,49 @@
+# My
+images/*
+audio/*
+# Keep folder placeholders
+!images/.gitkeep
+!audio/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env/
+.env/
+.envrc
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+pip-log.txt
+
+# VS Code
+.vscode/
+
+# MoviePy/FFmpeg temp files
+*.temp-audio.m4a
+*.tmp
+*.log
+
+# Outputs
+output.mp4
+output_preview.mp4
+src/output.mp4
+src/output_preview.mp4
+*.mp4
+
+# Generated parameter logs
+params.json
+render_log.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Image/audio cache (keep your source images/audio in repo; ignore derived caches)
+src/images/.cache/
+src/audio/.cache/
