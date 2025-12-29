@@ -1,44 +1,29 @@
 import argparse
 import json
 import random
+import math
+import time
 from pathlib import Path
 
 from moviepy.video.VideoClip import ImageClip
-from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip, concatenate_videoclips
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 
-# Try MoviePy concatenate; fall back if missing
-try:
-    from moviepy.video.compositing.concatenate import concatenate_videoclips
-except Exception:
-    def concatenate_videoclips(clips, method="compose"):
-        if not clips:
-            raise ValueError("No clips to concatenate")
-        W, H = clips[0].w, clips[0].h
-        t = 0.0
-        placed = []
-        for c in clips:
-            placed.append(c.with_start(t))  # MoviePy 2.x
-            t += c.duration
-        return CompositeVideoClip(placed, size=(W, H)).with_duration(t)
-
 # Audio loop (MoviePy 2.x)
-try:
-    from moviepy.audio.fx.all import audio_loop
-except Exception:
-    try:
-        from moviepy.audio.fx.audio_loop import audio_loop
-    except Exception:
-        audio_loop = None
+from moviepy.audio.fx.AudioLoop import AudioLoop as audio_loop
 
+from moviepy.video.fx.FadeIn import FadeIn as vfx_fadein
+
+from moviepy.video.fx.FadeOut import FadeOut as vfx_fadeout
+from moviepy.video.fx.CrossFadeIn import CrossFadeIn as vfx_crossfadein
 
 def cover_scale_factor(img_w, img_h, target_w, target_h):
-    return max(target_w / img_w, target_h / img_h)
+    return max(target_w / img_w, target_h / img_h) * 1.002
 
 
 def ken_burns_clip(image_path: Path, size=(1920, 1080), duration=5.0,
                    zoom_start=1.0, zoom_end=1.1, pan="auto",
-                   start_offset=None, end_offset=None):
+                   start_offset=None, end_offset=None, max_pan_speed=None):
     W, H = size
     base = ImageClip(str(image_path)).with_duration(duration)
 
@@ -54,62 +39,99 @@ def ken_burns_clip(image_path: Path, size=(1920, 1080), duration=5.0,
 
     # Compute dynamic excess size over time based on zoom
     def dx_at(t):
-        return max(0, int(base.w * s0 * z(t)) - W)
+        w_t = math.ceil(base.w * s0 * z(t))
+        return max(0, w_t - W)
     def dy_at(t):
-        return max(0, int(base.h * s0 * z(t)) - H)
+        h_t = math.ceil(base.h * s0 * z(t))
+        return max(0, h_t - H)
 
     # Choose pan or use provided offsets; derive ratios so we can clamp per-frame
     if pan == "auto" and (start_offset is None or end_offset is None):
-        pan = random.choice([
-            "left_to_right", "right_to_left",
-            "top_to_bottom", "bottom_to_top", "none"
-        ])
+        # Use per-image random for pan selection if a global seed is set
+        import inspect
+        frame = inspect.currentframe()
+        caller_locals = frame.f_back.f_locals if frame and frame.f_back else {}
+        idx = caller_locals.get('idx', None)
+        global_seed = caller_locals.get('args', {}).get('seed', None) if 'args' in caller_locals else None
+        if global_seed is not None and idx is not None:
+            rng = random.Random(global_seed + idx)
+            pan = rng.choice([
+                "left_to_right", "right_to_left",
+                "top_to_bottom", "bottom_to_top", "none"
+            ])
+        else:
+            pan = random.choice([
+                "left_to_right", "right_to_left",
+                "top_to_bottom", "bottom_to_top", "none"
+            ])
+        print(f"Auto-selected pan: {pan}")
 
-    # Start/end ratios in [0,1]: 0 means fully left/top (-dx/-dy), 1 means right/bottom (0)
-    start_rx = end_rx = start_ry = end_ry = 0.5  # default center
-    if start_offset is not None and end_offset is not None:
-        # Convert provided pixel offsets to ratios using start zoom bounds
-        dx0 = dx_at(0.0)
-        dy0 = dy_at(0.0)
-        def to_ratio(off, dmax):
-            # clamp pixel offsets first; off is in [-dmax, 0]
-            off = min(0, max(-dmax, int(off)))
-            # map [-dmax, 0] -> [0,1]
-            return 0.0 if dmax == 0 else (off + dmax) / dmax
-        start_rx = to_ratio(start_offset.get("x", -dx0 // 2), dx0)
-        start_ry = to_ratio(start_offset.get("y", -dy0 // 2), dy0)
-        end_dx0 = dx_at(duration)
-        end_dy0 = dy_at(duration)
-        end_rx = to_ratio(end_offset.get("x", -end_dx0 // 2), end_dx0)
-        end_ry = to_ratio(end_offset.get("y", -end_dy0 // 2), end_dy0)
+    # Derive safe linear endpoints in pixel space using intersection ranges
+    min_dx, min_dy = min(dx_at(0.0), dx_at(duration)), min(dy_at(0.0), dy_at(duration))
+    cx = -min_dx // 2
+    cy = -min_dy // 2
+
+    def clamp_xy(x, y):
+        return (min(0, max(-min_dx, int(x))), min(0, max(-min_dy, int(y))))
+
+    # Endpoints: prefer provided offsets, then ratios in a dict, else from pan direction
+    if isinstance(pan, dict):
+        sr = pan.get("start_ratio", {})
+        er = pan.get("end_ratio", {})
+        def rget(d, k, default):
+            try:
+                return float(d.get(k, default))
+            except Exception:
+                return default
+        rx0 = rget(sr, "rx", rget(sr, "x", 0.5))
+        ry0 = rget(sr, "ry", rget(sr, "y", 0.5))
+        rx1 = rget(er, "rx", rget(er, "x", 0.5))
+        ry1 = rget(er, "ry", rget(er, "y", 0.5))
+        px0, py0 = -min_dx + rx0 * min_dx, -min_dy + ry0 * min_dy
+        px1, py1 = -min_dx + rx1 * min_dx, -min_dy + ry1 * min_dy
+        px0, py0 = clamp_xy(px0, py0)
+        px1, py1 = clamp_xy(px1, py1)
+    elif start_offset is not None and end_offset is not None:
+        px0, py0 = clamp_xy(start_offset.get("x", cx), start_offset.get("y", cy))
+        px1, py1 = clamp_xy(end_offset.get("x", cx), end_offset.get("y", cy))
     else:
-        # Derive ratios from pan choice
+        print(f"Using pan direction: {pan}")
         if pan == "left_to_right":
-            start_rx, end_rx = 0.0, 1.0
-            start_ry = end_ry = 0.5
+            px0, px1 = -min_dx, 0
+            py0 = py1 = cy
         elif pan == "right_to_left":
-            start_rx, end_rx = 1.0, 0.0
-            start_ry = end_ry = 0.5
+            px0, px1 = 0, -min_dx
+            py0 = py1 = cy
         elif pan == "top_to_bottom":
-            start_ry, end_ry = 0.0, 1.0
-            start_rx = end_rx = 0.5
+            py0, py1 = -min_dy, 0
+            px0 = px1 = cx
         elif pan == "bottom_to_top":
-            start_ry, end_ry = 1.0, 0.0
-            start_rx = end_rx = 0.5
-        else:  # none/center
-            start_rx = end_rx = 0.5
-            start_ry = end_ry = 0.5
+            py0, py1 = 0, -min_dy
+            px0 = px1 = cx
+        else:
+            px0 = px1 = cx
+            py0 = py1 = cy
 
-    # Position function with per-frame clamping using ratios
+    # Optionally cap overall pan speed (Euclidean) in pixels/second
+    if max_pan_speed and duration > 0:
+        dist = math.hypot(px1 - px0, py1 - py0)
+        max_dist = float(max_pan_speed) * float(duration)
+        if dist > max_dist and dist > 0:
+            scale = max_dist / dist
+            px1 = px0 + (px1 - px0) * scale
+            py1 = py0 + (py1 - py0) * scale
+            # Re-clamp to intersection bounds
+            px1, py1 = clamp_xy(px1, py1)
+
+    # Linear interpolation in pixel space with per-frame safety clamp
     def pos(t):
-        # interpolate ratios
-        rx = start_rx + (end_rx - start_rx) * (t / duration)
-        ry = start_ry + (end_ry - start_ry) * (t / duration)
+        a = t / duration
+        x = int(px0 + (px1 - px0) * a)
+        y = int(py0 + (py1 - py0) * a)
         dx = dx_at(t)
         dy = dy_at(t)
-        # map ratios back to pixel offsets in [-dx, 0], [-dy, 0]
-        x = -dx + int(rx * dx)
-        y = -dy + int(ry * dy)
+        x = min(0, max(-dx, x))
+        y = min(0, max(-dy, y))
         return (x, y)
 
     clip = CompositeVideoClip([zoomed.with_position(pos)], size=size).with_duration(duration)
@@ -117,10 +139,6 @@ def ken_burns_clip(image_path: Path, size=(1920, 1080), duration=5.0,
     # Log ratios and also the start/end pixel offsets that were used at endpoints
     dx_start, dy_start = dx_at(0.0), dy_at(0.0)
     dx_end, dy_end = dx_at(duration), dy_at(duration)
-    x0 = -dx_start + int(start_rx * dx_start)
-    y0 = -dy_start + int(start_ry * dy_start)
-    x1 = -dx_end + int(end_rx * dx_end)
-    y1 = -dy_end + int(end_ry * dy_end)
 
     params = {
         "image": str(image_path),
@@ -130,16 +148,22 @@ def ken_burns_clip(image_path: Path, size=(1920, 1080), duration=5.0,
         "zoom_start": z0,
         "zoom_end": z1,
         "pan": pan,
-        "start_offset": {"x": x0, "y": y0},
-        "end_offset": {"x": x1, "y": y1},
-        "start_ratio": {"x": start_rx, "y": start_ry},
-        "end_ratio": {"x": end_rx, "y": end_ry},
+        "start_offset": {"x": int(px0), "y": int(py0)},
+        "end_offset": {"x": int(px1), "y": int(py1)},
+        "start_ratio": {"x": 0.0 if min_dx == 0 else (px0 + min_dx) / max(1, min_dx),
+                          "y": 0.0 if min_dy == 0 else (py0 + min_dy) / max(1, min_dy)},
+        "end_ratio": {"x": 0.0 if min_dx == 0 else (px1 + min_dx) / max(1, min_dx),
+                "y": 0.0 if min_dy == 0 else (py1 + min_dy) / max(1, min_dy)},
+        "max_pan_speed": max_pan_speed if max_pan_speed is not None else None,
+        "pan_distance": float(math.hypot(px1 - px0, py1 - py0)),
+        "pan_speed": float(0.0 if duration == 0 else math.hypot(px1 - px0, py1 - py0) / duration),
     }
     return clip, params
 
 
 def build_slideshow(image_files, audio_file=None, size=(1920, 1080),
-                    per_image=5.0, fps=30, zoom=0.10, reuse_params=None):
+                    per_image=5.0, fps=30, zoom=0.10, reuse_params=None,
+                    random_pan=False, fade=0.0, max_pan_speed=None):
     clips = []
     logs = []
     param_map = {}
@@ -155,22 +179,25 @@ def build_slideshow(image_files, audio_file=None, size=(1920, 1080),
         if entry:
             z0 = float(entry.get("zoom_start", default_z0))
             z1 = float(entry.get("zoom_end", default_z1))
-            pan = entry.get("pan", "none")
-            # Prefer ratios if present; fall back to offsets
-            sr = entry.get("start_ratio")
-            er = entry.get("end_ratio")
-            if sr and er:
-                start_offset = {"x": None, "y": None}  # signal ratios usage
-                end_offset = {"x": None, "y": None}
-                # pass None offsets; ken_burns_clip will use ratios from entry? we’ll pass them via pan fields
-                # We embed ratios into entry by attaching them to start_offset/end_offset special keys
-                start_offset = {"rx": float(sr.get("x", 0.5)), "ry": float(sr.get("y", 0.5))}
-                end_offset = {"rx": float(er.get("x", 0.5)), "ry": float(er.get("y", 0.5))}
+            # Force random pan: always use pan="auto" and no offsets
+            if random_pan:
+                print(f"Randomizing pan for image: {img.name}")
+                pan = "auto"
+                start_offset = end_offset = None
             else:
-                start_offset = entry.get("start_offset")
-                end_offset = entry.get("end_offset")
+                pan = entry.get("pan", "none")
+                sr = entry.get("start_ratio")
+                er = entry.get("end_ratio")
+                if sr and er:
+                    start_offset = {"rx": float(sr.get("x", 0.5)), "ry": float(sr.get("y", 0.5))}
+                    end_offset = {"rx": float(er.get("x", 0.5)), "ry": float(er.get("y", 0.5))}
+                else:
+                    start_offset = entry.get("start_offset")
+                    end_offset = entry.get("end_offset")
+                print(f"Reusing pan for image: {img.name} -> {pan}")
             duration = float(entry.get("duration", per_image))
         else:
+            print(f"Using default params for image: {img.name}")
             z0, z1 = default_z0, default_z1
             pan = "auto"
             start_offset = end_offset = None
@@ -186,14 +213,30 @@ def build_slideshow(image_files, audio_file=None, size=(1920, 1080),
             img, size=size, duration=duration,
             zoom_start=z0, zoom_end=z1, pan=pan,
             start_offset=None if isinstance(pan, dict) else start_offset,
-            end_offset=None if isinstance(pan, dict) else end_offset
+            end_offset=None if isinstance(pan, dict) else end_offset,
+            max_pan_speed=max_pan_speed
         )
 
         # If we passed ratios via pan dict, params already contain ratios; else keep offsets
         logs.append(params)
         clips.append(clip)
 
-    video = concatenate_videoclips(clips, method="compose")
+    # Build final video with true crossfade using CrossFadeIn and CompositeVideoClip
+    fade = max(0.0, float(fade or 0.0))
+    if fade > 0.0:
+        composite_clips = []
+        t = 0.0
+        for idx, clip in enumerate(clips):
+            if idx == 0:
+                composite_clips.append(clip.with_start(0))
+            else:
+                # Each subsequent clip starts before the previous ends, overlapping by fade seconds
+                start_time = idx * (clip.duration - fade)
+                composite_clips.append(vfx_crossfadein(fade).apply(clip.with_start(start_time)))
+        total_duration = len(clips) * clips[0].duration - (len(clips) - 1) * fade
+        video = CompositeVideoClip(composite_clips, size=size).with_duration(total_duration)
+    else:
+        video = concatenate_videoclips(clips, method="compose")
 
     if audio_file and Path(audio_file).exists():
         audio = AudioFileClip(str(audio_file))
@@ -245,9 +288,39 @@ def main():
         default=None,
         help="Path to a JSON file with previously serialized per-image parameters."
     )
+    parser.add_argument(
+        "--random-pan",
+        action="store_true",
+        help="Ignore pan info in params and choose a random pan per image."
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible pan selection."
+    )
+    parser.add_argument(
+        "--fade",
+        type=float,
+        default=0.0,
+        help="Seconds to crossfade between images (0 disables)."
+    )
+    parser.add_argument(
+        "--max-pan-speed",
+        type=float,
+        default=None,
+        help="Maximum panning speed in pixels per second (caps movement length)."
+    )
     args = parser.parse_args()
 
     here = Path(__file__).resolve().parent
+
+    # Start timing
+    _render_start = time.perf_counter()
+
+    # Optional reproducible randomness
+    if args.seed is not None:
+        random.seed(args.seed)
 
     # Normalize inputs relative to main.py unless absolute
     images_arg = Path(args.images)
@@ -307,12 +380,16 @@ def main():
         else:
             print(f"Warning: params file not found: {params_path}")
 
+    _build_start = time.perf_counter()
     video, logs = build_slideshow(
         image_files,
         audio_file=str(audio_path) if audio_path.exists() else None,
         size=(args.width, args.height),
-        per_image=args.per_image, fps=args.fps, zoom=args.zoom, reuse_params=reuse_params
+        per_image=args.per_image, fps=args.fps, zoom=args.zoom, reuse_params=reuse_params,
+        random_pan=args.random_pan, fade=args.fade, max_pan_speed=args.max_pan_speed
     )
+    _build_end = time.perf_counter()
+    _build_time = _build_end - _build_start
 
     # Serialize parameters if requested
     if args.log:
@@ -361,7 +438,17 @@ def main():
     elif args.preview and args.codec.endswith("_amf"):
         write_kwargs["ffmpeg_params"] = ["-quality", "speed"]
 
+    _encode_start = time.perf_counter()
     video.write_videofile(str(out_path), **write_kwargs)
+
+    # End timing
+    _render_end = time.perf_counter()
+    _elapsed = _render_end - _render_start
+    _encode_time = _render_end - _encode_start
+    print(f"Render completed in {_elapsed:.2f} seconds -> {out_path}")
+    print(f" - Codec: {args.codec}")
+    print(f" - Build (slideshow generation): {_build_time:.2f}s")
+    print(f" - Encode (write_videofile): {_encode_time:.2f}s")
 
 
 if __name__ == "__main__":

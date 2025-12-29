@@ -1,23 +1,22 @@
-# Ken Burns Video Project
+# Ken Burns Video
 
-Combine a list of images into a video with a Ken Burns effect and an optional audio track. Supports parameter serialization, reusing saved effect params, preview rendering, and configurable codecs (including GPU encoders via FFmpeg).
+Combine a list of images into a video with a Ken Burns effect and an optional audio track. Supports parameter serialization, preview rendering, configurable codecs (including GPU encoders via FFmpeg), crossfades, linear panning, and max pan speed.
 
 ## Project Structure
 
 ```
-kenburns-video-project
-├── src
-│   ├── main.py          # Main script
-│   ├── images           # Input images
-│   ├── audio            # Input audio (e.g., audio.mp3)
-│   └── utils            # (optional) helpers
-├── requirements.txt     # Dependencies
-└── README.md            # Documentation
+ken_burnser
+├── main.py             # Main script
+├── requirements.txt    # Dependencies
+├── README.md           # Documentation
+├── images/             # Input images
+├── audio/              # Input audio (e.g., audio.mp3)
+└── output/             # Rendered videos and logs
 ```
 
 ## Requirements
 
-Install dependencies in your virtual environment:
+Install dependencies in your environment:
 
 ```
 pip install -r requirements.txt
@@ -25,19 +24,19 @@ pip install -r requirements.txt
 
 ## Usage
 
-Basic render (paths are resolved relative to `src/main.py` by default):
+Basic render (paths are resolved relative to `main.py` by default):
 ```
-python src/main.py --images images --audio audio/audio.mp3 --out output.mp4
+python main.py --images images --audio audio/audio.mp3 --out output/output.mp4
 ```
 
 Common options:
-- `--images`: folder of images or a text file listing image paths (relative or absolute).
+- `--images`: folder of images or a text file listing image paths.
 - `--audio`: audio file path (optional).
 - `--width --height`: target frame size (default 1920x1080).
 - `--per-image`: seconds per image (default 5.0).
 - `--zoom`: extra zoom proportion, e.g., 0.12 = 12%.
 - `--fps`: frames per second.
-- `--out`: output filename.
+- `--out`: output filename (default `output/output.mp4`).
 - `--codec`: FFmpeg encoder. Examples:
   - CPU: `libx264`, `libx265`
   - NVIDIA: `h264_nvenc`, `hevc_nvenc`
@@ -46,14 +45,14 @@ Common options:
 
 Show help:
 ```
-python src/main.py --help
+python main.py --help
 ```
 
 ### Preview mode
 
 Render a faster, shorter, lower-resolution preview:
 ```
-python src/main.py --preview --codec h264_nvenc --out output_preview.mp4
+python main.py --preview --codec h264_nvenc --out output/output_preview.mp4
 ```
 Preview applies:
 - Limits to a few images
@@ -61,28 +60,61 @@ Preview applies:
 - Shorter per-image duration
 - Faster presets/ffmpeg params
 
-### Serialize and reuse effect parameters
+### Serialize and reuse parameters
 
-Render and save per-image params to JSON (paths serialized relative to `src/main.py`):
+Render and save per-image params to JSON (paths serialized relative to `main.py`):
 ```
-python src/main.py --images images --audio audio/audio.mp3 --log params.json
+python main.py --images images --audio audio/audio.mp3 --log output/params.json
 ```
 
 Re-render using saved params:
 ```
-python src/main.py --images images --audio audio/audio.mp3 --params params.json --out output.mp4
+python main.py --images images --audio audio/audio.mp3 --params output/params.json --out output/output.mp4
 ```
 
 Notes:
 - When loading `--params`, image paths in the JSON can be relative or absolute; they’re normalized.
-- The renderer logs zoom, pan, clamped start/end positions, ratios, and duration per image.
+- The renderer logs zoom, pan, start/end offsets, ratios, duration, and pan speed per image.
 
-## Ken Burns Effect details
+## Command-Line Options
 
-- Images are scaled to cover the target frame.
-- Zoom and pan are animated over time.
-- Position is clamped each frame to avoid empty borders as zoom changes.
-- Pan direction can be auto, or derived from saved params.
+- `--images PATH`: Folder of images or a text file listing image paths. Default: `images`.
+- `--audio PATH`: Optional audio file to mix into the video. Default: `audio/audio.mp3`.
+- `--width INT`: Output width in pixels. Default: `1920`.
+- `--height INT`: Output height in pixels. Default: `1080`.
+- `--per-image FLOAT`: Seconds each image stays on screen. Default: `5.0`.
+- `--zoom FLOAT`: Extra zoom proportion applied across the clip (e.g., `0.12` = 12%). Default: `0.12`.
+- `--fps INT`: Output frames per second. Default: `24`.
+- `--out PATH`: Output video path. Default: `output/output.mp4`.
+- `--codec NAME`: FFmpeg encoder. Default: `libx264`.
+  - Examples: CPU `libx264`, `libx265`; NVIDIA `h264_nvenc`, `hevc_nvenc`; Intel `h264_qsv`, `hevc_qsv`; AMD `h264_amf`, `hevc_amf`.
+- `--preview`: Faster, shorter, lower-resolution preview (limits images, sets 854x480, reduces durations, speeds up presets).
+- `--log PATH`: Write a JSON log with per-image parameters used during render.
+- `--params PATH`: Read per-image parameters from a previous JSON log to reproduce a render.
+- `--random-pan`: Ignore pan info from `--params` and choose a random pan per image.
+- `--seed INT`: Random seed for reproducible panning when using `--random-pan`.
+- `--fade FLOAT`: Crossfade duration in seconds between images (0 disables). Default: `0.0`.
+- `--max-pan-speed FLOAT`: Maximum panning speed in pixels per second. Caps movement distance while preserving direction. Default: unset.
+
+## Transitions and Panning
+
+- `--fade SECONDS`: Crossfade between clips for smoother transitions.
+  - Fades are applied with safe overlap (limited by clip durations).
+- `--random-pan`: Ignore pan info in `--params` and choose a random pan per image.
+- `--seed INT`: Seed for reproducible random pan selection.
+- Linear panning: Movement is interpolated linearly in pixel space between safe endpoints, preserving direction.
+- No black borders: Images are scaled to cover and clamped per-frame; a small overscan and ceiling math prevent edge gaps.
+- `--max-pan-speed PIXELS_PER_SECOND`: Caps panning speed; keeps direction by shortening the endpoint distance.
+
+Examples:
+```
+# Preview with random pan, 0.7s crossfade, and speed cap
+python main.py --images images --audio audio/audio.mp3 \
+  --preview --out output/output_preview.mp4 --random-pan --seed 21 --fade 0.7 --max-pan-speed 150
+
+# Full render with linear pan and fades
+python main.py --images images --audio audio/audio.mp3 --out output/output.mp4 --fade 0.7
+```
 
 ## GPU encoding
 
@@ -97,7 +129,7 @@ ffmpeg -hide_banner -encoders | findstr amf
 
 ## Tips
 
-- Place source images in `src/images` and audio in `src/audio`.
+- Place source images in `images/` and audio in `audio/`.
 - Use a text file for a custom image order; paths inside can be relative to the list file location.
 - For reproducible renders, serialize params and reuse with `--params`.
 
