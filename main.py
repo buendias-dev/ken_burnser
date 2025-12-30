@@ -186,14 +186,19 @@ def build_slideshow(image_files, audio_file=None, size=(1920, 1080),
                 start_offset = end_offset = None
             else:
                 pan = entry.get("pan", "none")
+                # Prefer explicit pixel offsets if present
+                start_offset = entry.get("start_offset")
+                end_offset = entry.get("end_offset")
                 sr = entry.get("start_ratio")
                 er = entry.get("end_ratio")
-                if sr and er:
-                    start_offset = {"rx": float(sr.get("x", 0.5)), "ry": float(sr.get("y", 0.5))}
-                    end_offset = {"rx": float(er.get("x", 0.5)), "ry": float(er.get("y", 0.5))}
-                else:
-                    start_offset = entry.get("start_offset")
-                    end_offset = entry.get("end_offset")
+                # Only use ratio-based control when no pan direction is provided
+                # or pan is explicitly "none"/"auto" and ratios exist.
+                if (not isinstance(pan, dict)) and pan in {"none", "auto"} and sr and er and not (start_offset and end_offset):
+                    pan = {
+                        "start_ratio": {"rx": float(sr.get("x", 0.5)), "ry": float(sr.get("y", 0.5))},
+                        "end_ratio": {"rx": float(er.get("x", 0.5)), "ry": float(er.get("y", 0.5))},
+                    }
+                    start_offset = end_offset = None
                 print(f"Reusing pan for image: {img.name} -> {pan}")
             duration = float(entry.get("duration", per_image))
         else:
@@ -202,12 +207,6 @@ def build_slideshow(image_files, audio_file=None, size=(1920, 1080),
             pan = "auto"
             start_offset = end_offset = None
             duration = per_image
-
-        # If ratios provided, translate to pixel offsets at endpoints for logging consistency
-        if start_offset and "rx" in start_offset:
-            # We don’t have dx/dy here; let ken_burns_clip compute with ratios via pan parameter hack
-            # Use pan="none" and send ratios by packing them into pan string; simpler approach: attach to pan as tuple
-            pan = {"start_ratio": start_offset, "end_ratio": end_offset}
 
         clip, params = ken_burns_clip(
             img, size=size, duration=duration,
